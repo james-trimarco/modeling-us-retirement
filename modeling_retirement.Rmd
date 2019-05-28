@@ -16,45 +16,37 @@ knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_chunk$set(dev="png", out.width = '90%')
 ```
 
-# Setup
-## Prep
-### Set options
-```{r set_contrasts}
+## Part 1: Setup
+```{r set_contrasts, include=FALSE}
 options(contrasts = c("contr.treatment", "contr.treatment"))
 options('contrasts')
 ```
 
 ### Import libraries
-```{r import_libs, include=FALSE}
+```{r import_libs, warning=FALSE, message=FALSE}
 library(tidyverse) # all-purpose tools
 library(broom) # converting models to dataframes
-#library(margins) 
 library(here) # finding source files
-library(foreign) # importing
-#library(caret)
-#library(haven)
-library(survey)
-library(srvyr)
-library(tools)
-library(wesanderson)
-library(glue)
+library(survey) # for handling weighted survey data
+library(srvyr) # allows tidyverse syntax on survey objects
+library(tools) 
+library(wesanderson) # nice colors
+library(glue) # nice concatenation
 ```
 
-### Add fonts
-```{r add_fonts}
+### Obtain fonts
+```{r add_fonts, include=FALSE}
 library(showtext)
 ## Loading Google fonts (http://www.google.com/fonts)
 font_add_google("spectral", "spectral")
 font_add_google("roboto slab", "roboto")
 ```
 
-### Plotting theme
+### Theme for plots
+Mix of Roboto with a little Spectral mixed in. 
 ```{r create_theme}
-## Automatically use showtext to render text for future devices
-showtext_auto(enable = TRUE)
-
 theme_set(theme_minimal() + theme(text=element_text(size=12, family="roboto"), 
-      plot.title = element_text(size=18, vjust=2),
+      plot.title = element_text(size=16, vjust=2),
       plot.margin = unit(c(1,1,b = 1,1), "cm"),
       plot.caption = element_text(size = 8, family = "spectral", vjust = -2),
       axis.title.y= element_text(vjust = 2), 
@@ -62,37 +54,27 @@ theme_set(theme_minimal() + theme(text=element_text(size=12, family="roboto"),
                                                   b = 0, l = 0, unit = "cm"), vjust = -2)))
 ```
 
-### Define functions
-
-```{r convert_income}
-convert_income <- function(x){
-     x <- gsub("\\$", "", x)
-     x <- gsub("\\s[a-z]*", "", x)
-     x <- str_sub(x, 1, 2)
-     x <- gsub("un", "05", x)
-     as.numeric(x)
-}
-```
-
-
-### read in the data
+### Read in the data
+I'm not including the data in this GitHub repo because it's quite large. To run the code below, simply download the data from [this link](http://gss.norc.org/documents/stata/GSS_stata.zip) and point `mypath` to your local copy. 
 ```{r importGSS, cache = TRUE}
 mypath <- here::here("GSS_spss", "GSS_stata", "GSS7216_R4.DTA")
 
 gss_all <- foreign::read.dta(mypath)
 ```
 
+## Part 2: Munging the data
+### Define variables of interest  
+The GSS comes with more than 5,000 variables, most of which have little or nothing to do with the age at which a person will retire. Most of the ones I'm selecting here — including age, race, sex, and marital status — have all proved to result in statistically significant coefficients in logistic regression. 
 
-# Part 2: Retirement
-One phenomenon that's interesting to model is the probability that someone is retired. Of course, it's obvious that the probability that someone is retired increases as they get older. Here's how to the curve looks for the entire GSS dataset, without taking any other variables into consideration:
+A few of the variables, like `race` and `degree`, did not produce statistically significant coefficients, but I'm selecting them anyway so that they'll be included in the complex survey design and are available for exploration. 
 
-## Simple model
-### Setup
-#### Define vars of interest
-```{r include=FALSE}
-cont_vars <- c("year", "id", "age", "childs", "educ")
+We'll also keep all the variables used to create the survey design, including weights and strata.
 
-cat_vars <- c("race", "sex", "wrkstat", "degree", "marital", "wrkslf", "born", "spwrksta", "income06", "wrkgovt")
+```{r select_vars}
+cont_vars <- c("year", "id", "age")
+
+cat_vars <- c("race", "sex", "wrkstat", "degree", "marital", 
+              "born", "wrkgovt")
 
 wt_vars <- c("vpsu",
              "vstrat",
@@ -103,22 +85,24 @@ wt_vars <- c("vpsu",
              "sample")              # sampling frame and method
 
 vars <- c(cont_vars, cat_vars, wt_vars)
-```
 
-```{r INCLUDE = FALSE}
 vars
 ```
 
-#### Munge the data
-```{r first_munge, include = FALSE, cache = TRUE}
-library(Hmisc)
+### Munge the data  
+The code below executes the grunt work in the analysis. A couple of key details include:
 
+- We'll keep variables for age and age/10. The latter gives us our model a more meaningful coefficient for age, since each single year of age changes the probability of retirement just a little. 
+- The filter on the `year` variable narrows the data to just 2000 to 2016. Picking a relatively narrow range of time helps control for the effect of political and other broad social changes on retirement trends. 
+- The code below drops the nows that are NA, "Don't know", or "Inapplicable." It's possible that these rows might carry some information and could help the model. But in this analysis I've made the choice to use only rows where the respondent intentionally provided a specific answer. 
+
+```{r first_munge, cache = TRUE}
 retire <- gss_all %>%
   select(one_of(vars)) %>%
-  drop_na(wrkstat, year, age, born, wrkgovt) %>%
-  filter(year >= 2000, year <= 2016) %>%
-  mutate(age_dec = age/10,
-         is_retired = ifelse(wrkstat == "retired", 1, 0), 
+  drop_na(wrkstat, year, age, born, wrkgovt) %>% # these are the vars that stuck
+  filter(year >= 2000, year <= 2016) %>% # selected date range
+  mutate(age_dec = age/10, # create a "decade of age" column
+         is_retired = ifelse(wrkstat == "retired", 1, 0), # create the response var
          born = fct_recode(born, "Native born" = "yes", "Foreign born" = "no", 
                            NULL = "iap", NULL = "dk", NULL = "na"),
          born = fct_drop(born), 
@@ -127,23 +111,15 @@ retire <- gss_all %>%
          wrkgovt = fct_recode(wrkgovt, "Private sector" = "private", 
                               "Public sector" = "government", 
                            NULL = "iap", NULL = "dk", NULL = "na"),
-         wrkgovt = fct_drop(wrkgovt),
-         wrkstat = fct_recode(wrkstat, NULL = "iap", NULL = "dk", NULL = "na",
-                              "Working full-time" = "working fulltime", 
-                              "Working part-time" = "working parttime", 
-                              "Retired" = "retired", "Keeping house" = "keeping house", 
-                              "Unemployed, laid off" = "unempl, laid off", 
-                              "Other" = "other", "Student" = "school", 
-                              "Temporarily unempl." = "temp not working"),
-         wrkstat = fct_drop(wrkstat), 
-         marital = C(marital, how.many = 5))
+         wrkgovt = fct_drop(wrkgovt), 
+         sex_born = interaction(sex, born, sep = ", ")) 
 
-nrow(retire)
-
-levels(retire$wrkstat)
+# Check the number of rows remaining
+nrow(retire) 
 ```
 
-#### Coerce to survey design
+#### Coerce to survey design  
+The following code chunk creates a complex survey design that maximizes the accuracy of inference  when applied to the general U.S. population. Curious readers can get the details [on the homepage of the Thomas Lumley's `survey` package](http://r-survey.r-forge.r-project.org/survey/). 
 ```{r survey_design}
 retire_svy <<- retire %>%
     mutate(stratvar = interaction(year, vstrat)) %>%
@@ -156,8 +132,10 @@ head(retire_svy)
 ```
 
 ## Summary statistics 
-### Barplots
-#### Adj and raw data
+### Effects of weights  
+Here's a quick look at how different our results will be when we use a complex survey design. 
+
+#### Munge to get weighted and nonweighted data
 ```{r demo_plot_data}
 options(survey.lonely.psu="adjust")
 
@@ -174,12 +152,15 @@ adj_data <- retire_svy %>%
 demo_data <- raw_data %>%
   left_join(adj_data) %>%
   gather(type_of_prop, prop, -n, -wrkstat, -adj_prop_low, -adj_prop_upp) %>%
-  mutate(type_of_prop = fct_recode(type_of_prop, "No weights" = "prop", "Adjusted" = "adj_prop"))
+  mutate(type_of_prop = fct_recode(type_of_prop, "Unweighted" = "prop", "Weighted" = "adj_prop")) %>%
+  arrange(wrkstat)
 
-demo_data
+head(demo_data, 5)
 ```
 
-#### barplot: effect of weights 
+#### Barplot 
+The effects are small, but noticeable. In particular, the data has more retired people then the general population. Our complex survey design will ensure that this fact doesn't distort our inference. 
+
 ```{r fig.showtext=TRUE, fig.dim = c(6, 4)}
 ggplot(demo_data, aes(x = reorder(wrkstat, -adj_prop_upp), y = prop, fill = type_of_prop)) +
   geom_bar(stat = "identity", position = "dodge") +
@@ -188,33 +169,41 @@ ggplot(demo_data, aes(x = reorder(wrkstat, -adj_prop_upp), y = prop, fill = type
   scale_x_discrete(labels = scales::wrap_format(10)) +
   theme(axis.text.x = element_text(size = 5)) +
   labs(title = "How GSS Weights Change the Distribution \nof Employment Status", 
-       subtitle = glue("n = ", nrow(demo_data)),
        y = "Proportion of respondents", 
        x = "Employment status", 
        fill = "Sampling \nmethod")
 ```
 
-### Boxplots
-#### boxplots by sex and country of birth
-```{r fig.showtext=TRUE}
+### Age distributions of retired people 
+Later on in this analysis, we'll see that statistically signicant differences in the probability of retirement depend on sex and whether a person was born in the U.S. The plots below are intended to put those conclusions into context.
+
+#### Boxplot by sex & birth country
+Note that this plot uses the unweighted data. A plot using the `svyboxplot()` function looks nearly identical. 
+```{r fig.showtext=TRUE, fig.dim = c(6, 5)}
 boxp_data <-  retire %>%
     filter(wrkstat != "IAP", is_retired == 1) %>%
     mutate(sex_born = interaction(sex, born, sep = ", "))
 
 ggplot(boxp_data, aes(x = sex_born, y = age, fill = sex_born)) +
-    scale_fill_manual(values = wes_palette("Royal1")) +
+    scale_fill_manual(values = wes_palette("Royal1"), guide = FALSE) +
     scale_x_discrete(labels = scales::wrap_format(5)) +
     geom_boxplot() +
-    geom_violin(alpha = .5)
+    labs(title = "Age Distribution of Retired Persons \nBy Sex & Country of Birth", 
+         subtitle = glue("n=", nrow(boxp_data)),
+         y = "Age of Respondent", 
+         x = "", 
+         fill = "")
 ```
 
-#### Bonferroni
-```{r}
-pairwise.t.test(boxp_data$age, boxp_data$sex_born, p.adjust.method = "bonferroni")
+
+#### Pairwise t-test
+As the plot above suggests, at least one pair of means is significantly different from one another. But the difference is small: with 95% confidence, the difference between the mean ages lies between about four months (.33 times a year) and 18 months (1.5 times a year).
+```{r svyttest}
+svyttest(age~sex_born, retire_svy)
 ```
 
-### Density
-#### Age distributions
+#### Density plot of age by sex  
+The density plot below sheds some light on how it comes to be that men are more likely to be retired at every age. The density plot of age for retired men looks like the plot for retired women, but pushed a few years younger. Some articles has suggested this happens because [women's savings lag behind men's](https://money.cnn.com/2018/07/12/retirement/women-men-retirement/index.html). 
 ```{r fig.showtext=TRUE}
 dens_plot_data <- retire %>%
   filter(is_retired == 1) 
@@ -223,7 +212,7 @@ ggplot(dens_plot_data, aes(x = age, fill = sex)) +
     geom_density(alpha = .5) +
     scale_color_manual(aes(alpha = .6)) +
     scale_fill_manual(values = wes_palette("Zissou1")[2:3]) +
-    labs(title = "Age Distribution of Retired Respondents by Gender", 
+    labs(title = "Age Distribution of Retired Respondents \nby Gender", 
          subtitle = glue("n =", scales::comma(nrow(dens_plot_data))), 
          fill = "Gender", 
          y = "Density", 
@@ -232,73 +221,55 @@ ggplot(dens_plot_data, aes(x = age, fill = sex)) +
         axis.ticks.y = element_blank())
 ```
 
-## Fit simple model
-### Age only
-#### Fit simple logistic model
+## Part III: Simple model
+Clearly, there's a relationship between age and the probability of retirement: We expect the latter to increase along with age. But a model that includes only age is going to miss subtler relationships like the one with sex that we just plotted. How well can we predict the probability of retirement using age alone?
+
+### Age only model
+#### Fit logistic model
 ```{r fit_simple}
-library(jtools)
 options(survey.lonely.psu="adjust")
 
 simple_model <- svyglm(is_retired~age_dec, 
                   family = "quasibinomial", 
                   design = retire_svy)
+```
 
+#### View coefficients
+```{r summ_simple}
+# This library gives us a few key functions for summarizing logistic models 
+# created with the svyglm() function. 
+library(jtools) 
 summ(simple_model)
-
-AIC(simple_model)
-
-deviance(simple_model)
 ```
 
-### Interpret
-#### Predict probabilites at 65, 70
-
-The probability of being retired increases by about 22.3 percentage points between ages 65 and 70. 
-
-
-#### Formulas
-Here's the relationship in terms of the log odds:
-$$
-\log(\frac {\pi_{retired}}{1 - \pi_{retired}}) = \alpha + \beta_{1 \ age}
-$$
+#### Write out and interpret
+For every 10-year increase in age, the odds of being retired increase by a factor of about 6 (e^1.76).
 
 $$
-log(\frac {\pi}{1 - \pi}) = -12.60 + 0.19(age)
+\text{odds}: (\frac {\pi}{1 - \pi}) = e^{-12.01 + 1.76(age/10)}
 $$
-And here it is in odds. For every one-year increase in age, the odds of being retired increase by 1.20. For every ten-year increase in age, the odds of retirement increase by a factor of six. 
+#### Examine predictive power
+The code below uses the model to predict whether each person in the data is retired. For now, we'll set the cutoff at .5 — so if the model says your probability of being retired is 0.51, we'll guess that you are retired. 
+```{r fit_simple}
+retire$fitted <- fitted(simple_model)
+retire$predicted <- as.numeric(retire$fitted >= 0.5)
+head(retire$predicted, 25)
+```
 
-$$
-\text{odds}: (\frac {\pi}{1 - \pi}) = e^{-12.60 + 0.19(age)}
-$$
-#### Predict for ages 65
+#### Sensitivity and specificity
+When we set the cutoff at 0.5, we guess the retirement status of the non-retired majority of cases correctly 96.0% of the time. But for the minority of cases that are retired, we're guessing right only 61.1% of the time. 
 ```{r}
-ages <- data.frame(age_dec = 6.5, sex = "Male") 
-# Specifying type = response means we'll get back probabilities (like the response values)
+cutoff <- 0.5
+truth <-factor(retire$is_retired, labels = c("not retired", "retired"))
+prediction <- factor(fitted(simple_model)>cutoff, labels =c("not retired", "retired"))
+
+sensitivity(data = prediction, reference = truth, positive = "retired")
+specificity(data = prediction, reference = truth, negative = "not retired")
 ```
 
+#### Compute confidence bands 
+I'm using 99% confidence here because our n is so large that the confidence bands are right up against the prediction line if we use 95% confidence. 
 
-#### Conf ints for both predictions
-```{r}
-simp <- predict(simple_model, 
-                        newdata = ages,
-                        type = "response", se = TRUE)
-
-simp <- data.frame(simp)
-# Get the confidence interval for Q1 in log odds
-ci_1 <- simp$response[1] + c(-1, 1)* qnorm(0.975)*simp$SE[1]; ci_1
-# Get the confidence interval for Q2 in log odds
-ci_1 <- simp$response[2] + c(-1, 1)* qnorm(0.975)*simp$SE[2]; ci_1
-
-exp(1.8)
-```
-With every year a person gets older, the odds of them being retired increase by. 
-
-```{r}
-exp(1.8)
-```
-
-
-#### Get smooth confint
 ```{r}
 smooth_ages <- data.frame(age_dec = pretty(1.8:10.0, 100)) 
 # get predictions
@@ -308,17 +279,15 @@ smooth_predict <- predict(simple_model,
 
 simp_plot_data <- data.frame(smooth_predict, age_dec = smooth_ages)
 
-#names(smooth_predict)
-# Generate the low and hi end of the band in log odds
-
 simp_plot_data <- simp_plot_data %>%
-  mutate(LoCI = response - qnorm(0.975) * SE, 
-         HiCI = response + qnorm(0.975) * SE)
+  mutate(LoCI = response - qnorm(0.995) * SE, 
+         HiCI = response + qnorm(0.995) * SE)
 
-head(simp_plot_data)
+
 ```
 
 #### Plot age with confint
+
 ```{r fig.showtext=TRUE, fig.height=4, fig.width = 6}
 ggplot(simp_plot_data, aes(x = age_dec, y = response)) + 
     scale_x_continuous(labels = scales::comma_format(suffix = 0), limits = c(4.0, 10.0)) +
@@ -326,80 +295,89 @@ ggplot(simp_plot_data, aes(x = age_dec, y = response)) +
     geom_ribbon(aes(ymin = LoCI, ymax = HiCI), stat = "identity", alpha = .2) +
     geom_line(colour = wes_palette("Royal1")[2],  size = 1.5) +
     labs(title = "Probability of Retirement as a Function of Age", 
-         subtitle = glue("n = ", scales::comma(nrow(retire)), "; Date range = 2000 to 2016"), 
+         subtitle = glue("99% confidence; ", "n = ", scales::comma(nrow(retire))), 
          y = "Probability of retirement", 
-         x = "Age")
+         x = "Age", 
+         caption = "Source: General Social Survey (date range: 2000 to 2016)")
 ```
 
-## Complex models
+## Part IV: More complex models
 
-### Model with age & sex
+### Model with age & sex  
+We already showed above that sex also helps explain whether we can expect a given person to be retired or not. How does the model change if we add sex and an interaction between sex and age?
 
-#### Build it
-```{r}
-model1 <- svyglm(is_retired~age+sex+age*sex,
+#### Fit logistic model
+```{r fit_age_sex_model}
+model1 <- svyglm(is_retired~age_dec+sex+age_dec*sex,
                 family = "quasibinomial",
                 design=retire_svy)
-
-summ(model1)
-
-anova(model1, test = "F")
-
-deviance(model1)
 ```
-#### Munge for plotting
+
+#### Conduct F-test on interaction term  
+The results are not ambiguous. Age, sex, and the interaction between them are all highly statistically significant. This means that the effect of age on the response is different for men and women.
+
+```{r}
+anova(model1, test = "F")
+```
+
+#### View coefficients  
+One thing that's tricky here is that, if we didn't include the interaction, the coefficient on `sexFemale` would be negative. That means we expect the probability of retirement for a woman to be lower than for a man of the same age. This expectation is still true in the model with the interaction because the interaction term has a negative coefficient. 
+```{r}
+summ(model1)
+```
+
+#### Write out and interpret
+$$
+\log(\frac {\pi_{retired}}{1 - \pi_{retired}}) = \alpha + \beta_{1 \ age} + \beta_{2 \ sex} + \beta_{3 \ sex \ * \ age}
+$$
+
+#### Examine predictive power
+None of these predictions are changed by the more complex model. 
+```{r fit_model1}
+retire$fitted1 <- fitted(model1)
+retire$predicted1 <- as.numeric(retire$fitted1 >= 0.5)
+head(retire$predicted1, 25)
+```
+
+#### Sensitivity and specificity
+When we set the cutoff at 0.5, we guess the retirement status of the non-retired majority of cases correctly 95.8% of the time — slightly worse than the simple model. But for the minority of cases that are retired, we're guessing right only 63.2% of the time. That's a significant improvement over the simple model. 
+
+I know this is screaming for an ROC curve, and we'll see one a little later in the analysis, when all three models are available. 
+```{r}
+cutoff <- 0.5
+truth <-factor(retire$is_retired, labels = c("not retired", "retired"))
+prediction <- factor(fitted(model1)>cutoff, labels =c("not retired", "retired"))
+
+sensitivity(data = prediction, reference = truth, positive = "retired")
+specificity(data = prediction, reference = truth, negative = "not retired")
+```
+
+#### Compute confidence bands
 ```{r fig.height= 4, fig.width=6}
 comp_predictors <- expand.grid(
-  age = seq(18, 90, length.out = 100), 
+  age_dec = seq(1.8, 9.0, length.out = 100), 
   sex = c("Male", "Female"))
 
 comp_predict <- predict(model1, newdata = comp_predictors, type = "response")
 
 comp_plot_data <- data.frame(comp_predict, 
-                             age = comp_predictors$age, 
+                             age_dec = comp_predictors$age_dec, 
                              sex = comp_predictors$sex)
 
-#
 comp_plot_data <- comp_plot_data %>%
-  mutate(LoCI = response - qnorm(0.975) * SE, 
-         HiCI = response + qnorm(0.975) * SE)
+  mutate(LoCI = response - qnorm(0.995) * SE, 
+         HiCI = response + qnorm(0.995) * SE)
 
-
-head(comp_plot_data, 3)
-```
-#### Show formula
-$$
-\log(\frac {\pi_{retired}}{1 - \pi_{retired}}) = \alpha + \beta_{1 \ age} + \beta_{2 \ sex} + \beta_{3 \ sex \ * \ age}
-$$
-#### Predict for ages 65 & 70
-```{r}
-exp(2)
-ages <- data.frame(age = 65, sex = "Male") 
-# Specifying type = response means we'll get back probabilities (like the response values)
-simp <- predict(model1, newdata = ages, type = "response"); simp
 ```
 
-
-#### Conf ints for both predictions
-```{r}
-age_sex_pred <- predict(model1, 
-                        newdata = ages,
-                        type = "link", se = TRUE)
-simp
-simp <- data.frame(simp)
-# Get the confidence interval for Q1 in log odds
-ci_1 <- simp$response[1] + c(-1, 1)* qnorm(0.975)*simp$SE[1]; ci_1
-# Get the confidence interval for Q2 in log odds
-ci_1 <- simp$response[2] + c(-1, 1)* qnorm(0.975)*simp$SE[2]; ci_1
-```
 
 #### Plot
 ```{r fig.showtext=TRUE, fig.height= 4, fig.width=6}
-ggplot(comp_plot_data, aes(x = age, y = response, group = sex)) + 
+ggplot(comp_plot_data, aes(x = age_dec, y = response, group = sex)) + 
     scale_color_manual(values = wes_palette("Royal1")[1:2]) +
-    scale_x_continuous(labels = scales::comma, limits = c(40, 90)) +
+    scale_x_continuous(labels = scales::comma_format(suffix = 0), limits = c(4.0, 9.0)) +
     scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
-    geom_vline(xintercept = 70, linetype = 2) +
+    geom_vline(xintercept = 7.0, linetype = 2) +
     geom_ribbon(aes(ymin = LoCI, ymax = HiCI), stat = "identity", alpha = .20) +
     geom_line(aes(color = sex), size = 1.5) +
     labs(title = "Relationship Between Age, Sex, \nand Probability of Being Retired", 
@@ -410,44 +388,26 @@ ggplot(comp_plot_data, aes(x = age, y = response, group = sex)) +
   theme(legend.position="right")
 ```
 
-#### Plot marginals
-```{r fig.height=3.5, fig.width=5.25, fig.showtext=TRUE}
-t_model <- tidy(model1, conf.int = TRUE) 
-
-t_model <- t_model %>%
-  filter(term != "(Intercept)")
-
-t_model
-t_model$labels <- c("Age", "Sex: Female", "Age*Female")
-
-ggplot(t_model, mapping = aes(x = labels, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  scale_y_continuous(limits = c(-4, 4)) +
-  labs(title = "Marginal Effects of Model Terms", 
-       y = "Value of Coefficient",
-       x = "") +
-  coord_flip()
-```
-
-### Model with more
-#### Build it
+### Model with age, sex, and country of birth
+#### Fit logistic model
 ```{r}
-
 options(survey.lonely.psu="adjust")
 
-model <- svyglm(is_retired~age+sex+born+wrkgovt
-                +age*sex
+model2 <- svyglm(is_retired~age_dec+sex+born+wrkgovt
+                +age_dec*sex
                 +wrkgovt*sex,
                 family = "quasibinomial", 
                 design=retire_svy)
+```
 
+#### Conduct F-test on interactions
+```{r}
+anova(model2, test = "F")
+```
 
-
-summ(model)
-
-anova(model, test = "F")
-
-deviance(model)
+#### View coefficients
+```{r}
+summ(model2)
 ```
 
 #### Plot marginals
@@ -457,7 +417,6 @@ t_model <- tidy(model, conf.int = TRUE)
 t_model <- t_model %>%
   filter(term != "(Intercept)")
 
-t_model
 t_model$labels <- c("Age/10", "Sex: Female", "Birthplace: Foreign", "Private employee",  "Age/10*Female", "Private*Female")
 
 ggplot(t_model, mapping = aes(x = labels, y = estimate, ymin = conf.low, ymax = conf.high)) +
@@ -467,15 +426,6 @@ ggplot(t_model, mapping = aes(x = labels, y = estimate, ymin = conf.low, ymax = 
        y = "Value of Coefficient",
        x = "") +
   coord_flip()
-
-ggplot(t_model, mapping = aes(x = labels, y = statistic, ymin = 0, ymax = 0)) +
-  geom_pointrange() +
-  scale_y_continuous(limits = c(-10, 40)) +
-  labs(title = "T-Statistics of Model Terms", 
-       y = "Value of Coefficient",
-       x = "") +
-  coord_flip()
-
 ```
 
 #### Show formulas
@@ -483,70 +433,92 @@ ggplot(t_model, mapping = aes(x = labels, y = statistic, ymin = 0, ymax = 0)) +
 $$
 \log(\frac {\pi_{retired}}{1 - \pi_{retired}}) = \alpha + \beta_{1 \ age} + \beta_{2 \ sex} + \beta_{3 \ birthplace} + \beta_{4 \ govt} +\beta_{5 \ sex \ * \ age}+\beta_{6 \ sex \ * \ govt}
 $$
-#### Predict for age 65
-```{r}
-
-ages <- data.frame(age = 6.5, sex = "Male", born = "Native born", wrkgovt = "Private sector") 
-# Specifying type = response means we'll get back probabilities (like the response values)
-
+#### Examine predictive power
+None of these predictions are changed by the more complex model. 
+```{r fit_model1}
+retire$fitted2 <- fitted(model2)
+retire$predicted2 <- as.numeric(retire$fitted2 >= 0.5)
+head(retire$predicted2, 25)
 ```
 
+#### Sensitivity and specificity
+When we set the cutoff at 0.5, we guess the retirement status of the non-retired majority of cases correctly 95.8% of the time — slightly worse than the simple model. But for the minority of cases that are retired, we're guessing right only 63.2% of the time. That's a significant improvement over the simple model. 
 
-#### Conf ints for both predictions
+I know this is screaming for an ROC curve, and we'll see one a little later in the analysis, when all three models are available. 
 ```{r}
-simp <- predict(model, 
-                        newdata = ages,
-                        type = "response", se = TRUE)
+cutoff <- 0.5
+truth <-factor(retire$is_retired, labels = c("not retired", "retired"))
+prediction <- factor(fitted(model2)>cutoff, labels =c("not retired", "retired"))
 
-simp <- data.frame(simp)
-# Get the confidence interval for Q1 in log odds
-ci_1 <- simp$response[1] + c(-1, 1)* qnorm(0.975)*simp$SE[1]; ci_1
-# Get the confidence interval for Q2 in log odds
-ci_1 <- simp$response[2] + c(-1, 1)* qnorm(0.975)*simp$SE[2]; ci_1
+sensitivity(data = prediction, reference = truth, positive = "retired")
+specificity(data = prediction, reference = truth, negative = "not retired")
+```
 
-exp(1.8)
+#### ROC curves
+```{r}
+df <- data.frame(response = retire$is_retired, 
+                 simple_model =fitted(simple_model), 
+                 model1 =fitted(model1), 
+                 model2 = fitted(model2))
+
+
+df_long <- df %>%
+  gather(model1, model2, simple_model, key = "model", value = "predictions")
+
+head(df_long, 3)
+```
+
+```{r}
+p <- ggplot(df_long, aes(d = response, m = predictions, color = model)) + 
+        geom_roc(cutoffs.at = c(0.75, 0.65, 0.5, 0.25), labelround = 2) +
+        labs(title = "ROC Curve for Model with Weight and Color")
+
+p1 <- ggplot(df_long, aes(d = response, m = predictions, color = model)) + 
+        scale_x_continuous(limits = c(0, .25)) +
+        scale_y_continuous(limits = c(.75, 1)) +
+        geom_roc(cutoffs.at = c(0.33, 0.25, 0.20), labelround = 2) +
+        labs(title = "ROC Curve for Model with Weight and Color")
+
+p1
+```
+
+```{r}
+calc_auc(p)
 ```
 
 #### Predict for age, born & self-employment
 ```{r fig.height= 4, fig.width=6}
 comp_predictors <- expand.grid(
-  age = seq(1.8, 9.0, length.out = 100), 
+  age_dec = seq(1.8, 9.0, length.out = 100), 
   sex = c("Male", "Female"), 
   born = c("Native born", "Foreign born"), 
   wrkgovt = c("Public sector", "Private sector"))
 
 
-comp_predict <- predict(model, newdata = comp_predictors, type = "response")
+comp_predict <- predict(model2, newdata = comp_predictors, type = "response")
 
 comp_plot_data <- data.frame(comp_predict, 
-                             age = comp_predictors$age, 
+                             age_dec = comp_predictors$age, 
                              sex = comp_predictors$sex, 
                              born = comp_predictors$born, 
                              wrkgovt = comp_predictors$wrkgovt)
 
 #
 comp_plot_data <- comp_plot_data %>%
-  mutate(LoCI = response - qnorm(0.975) * SE, 
-         HiCI = response + qnorm(0.975) * SE)
-
-
-#(1 -0.1/2)
-head(comp_plot_data)
+  mutate(LoCI = response - qnorm(0.995) * SE, 
+         HiCI = response + qnorm(0.995) * SE)
 ```
 
 ```{r fig.showtext=TRUE, fig.height= 5, fig.width=6.5}
-# retire %>%
-#   group_by(born, wrkgovt) %>%
-#   summarise(n = n())
-
-ggplot(comp_plot_data, aes(x = age, y = response, group = sex)) + 
+ggplot(comp_plot_data, aes(x = age_dec, y = response, group = sex)) + 
     scale_color_manual(values = wes_palette("Royal1")[1:2]) +
     scale_x_continuous(labels = scales::comma_format(suffix = 0), limits = c(4.0, 9.0)) +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1),  breaks = seq(.1, 1, .2)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1),  
+                       breaks = seq(.1, 1, .2)) +
     geom_ribbon(aes(ymin = LoCI, ymax = HiCI), stat = "identity", alpha = .10) +
     geom_line(aes(color = sex), size = 1.5) +
     facet_grid(born ~ wrkgovt) +
-  geom_vline(xintercept = 70, linetype = 3) +
+    geom_vline(xintercept = 7.0, linetype = 3) +
     labs(title = "Relationship Between Probability of Being Retired \nand Age, Sex, Birthplace & Employer", 
          subtitle = "95% confindence",
          y = "Probability of being retired", 
@@ -554,49 +526,4 @@ ggplot(comp_plot_data, aes(x = age, y = response, group = sex)) +
          color = "Gender") +
   theme(legend.position="right")
 ```
-
-```{r fig.showtext=TRUE, fig.height= 5, fig.width=6}
-# retire %>%
-#   group_by(born, wrkgovt) %>%
-#   summarise(n = n())
-
-ggplot(comp_plot_data, aes(x = age, y = response, group = born)) + 
-    scale_color_manual(values = wes_palette("Royal1")[1:2]) +
-    scale_x_continuous(labels = scales::comma, limits = c(40, 90)) +
-    scale_y_continuous(labels = scales::percent, limits = c(0, 1),  breaks = seq(.1, 1, .2)) +
-    geom_ribbon(aes(ymin = LoCI, ymax = HiCI), stat = "identity", alpha = .10) +
-    geom_line(aes(color = born), size = 1.5) +
-    facet_grid(sex ~ wrkgovt) +
-  geom_vline(xintercept = 70, linetype = 3) +
-    labs(title = "Relationship Between Age, Country of Birth, \nand Probability of Being Retired", 
-         subtitle = "90% confindence",
-         y = "Probability of being retired", 
-         x = "Age of Respondent", 
-         color = "Gender") +
-  theme(legend.position="right")
-```
-
-```{r fig.showtext=TRUE, fig.height= 5, fig.width=6}
-# retire %>%
-#   group_by(born, wrkgovt) %>%
-#   summarise(n = n())
-
-ggplot(comp_plot_data, aes(x = age, y = response, group = wrkgovt)) + 
-    scale_color_manual(values = wes_palette("Royal1")[1:2]) +
-    scale_x_continuous(labels = scales::comma, limits = c(40, 90)) +
-    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1), breaks = seq(.1, 1, .2)) +
-    geom_ribbon(aes(ymin = LoCI, ymax = HiCI), stat = "identity", alpha = .10) +
-    geom_line(aes(color = wrkgovt), size = 1.5) +
-    facet_grid(sex ~ born) +
-  geom_vline(xintercept = 70, linetype = 3) +
-    labs(title = "Relationship Between Age, Country of Birth, \nand Probability of Being Retired", 
-         subtitle = "90% confindence",
-         y = "Probability of being retired", 
-         x = "Age of Respondent", 
-         color = "Gender") +
-  theme(legend.position="right")
-
-?percent_format
-```
-
 
